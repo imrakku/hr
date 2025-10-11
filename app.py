@@ -35,7 +35,7 @@ You are a meticulous data extraction assistant. Your task is to analyze a candid
 1.  `matched_skills_full`: List all skills from the JD present in the CV.
 2.  `missing_skills_full`: List all skills from the JD not present in the CV.
 3.  `top_qualifications_full`: List all relevant degrees, certifications, and licenses.
-4.  `quantifiable_achievements_full`: List all achievements with numbers or metrics.
+4.  `quantifiable_achievements_full`: **Find and list all achievements with numbers, percentages, currency, or metrics (e.g., "managed a team of 10", "increased revenue by 15%", "led a project", "budgeted 5 crore", "drove growth").**
 5.  `relevant_experience_summary`: Provide a 1-2 paragraph summary of the candidate's work history as it relates directly to the JD's requirements.
 
 **JD:**
@@ -396,6 +396,10 @@ with main_container:
                 if evaluated_results:
                     df_results = pd.DataFrame(evaluated_results)
                     df_results["Score"] = pd.to_numeric(df_results["Score"], errors='coerce')
+                    
+                    # Ensure filename is the first column
+                    cols = ['filename'] + [col for col in df_results if col != 'filename']
+                    df_results = df_results[cols]
                     
                     # Sort results by score, descending
                     df_results = df_results.sort_values(by="Score", ascending=False)
