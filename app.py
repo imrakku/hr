@@ -45,36 +45,6 @@ You are a meticulous data extraction assistant. Your task is to analyze a candid
 {cv_text}
 """
 
-# --- Final Evaluation Prompt with Heuristics and Enhanced Rationale ---
-FINAL_EVALUATION_PROMPT = """
-You are a strict HR evaluation engine. Your task is to evaluate a candidate based on a complete set of extracted data and provide a final, summarized evaluation in a Markdown table.
-Apply heuristics to ensure the score is highly accurate and does not miss any critical connections.
-
-**Evaluation Hierarchy Heuristic:**
-1.  **Prioritize Full-Time Experience:** Evaluate and score the candidate's full-time work experience first. This is the most important factor.
-2.  **Next, Consider Internships:** After full-time experience, evaluate relevant internships.
-3.  **Finally, Consider Projects and Certifications:** Use live projects, open-source work, and certifications as supporting evidence for skills and qualifications.
-
-**Evaluation Rubric:**
-* **Scoring (1-10):** Based on the provided data, apply a final weighted score. The score should reflect the overall balance between matched and missing skills, penalizing the absence of key skills but not disproportionately if a candidate is strong in other areas.
-* **Fit:** High (>=8), Medium (5-7), Low (<=4).
-* **Rationale:** A single, concise, and factual sentence that **directly explains why the score is high or low**. For high scores, mention key strengths (e.g., matched skills, experience). For low scores, explicitly state which significant skills are missing.
-* **Matched Skills:** A summarized list of the top 3-5 most important matched skills.
-* **Missing Skills:** A summarized list of the top 3-5 most critical missing skills.
-* **Top Qualifications:** A summarized list of the top 2 most impressive qualifications.
-* **Quantifiable Achievements:** A summarized list of the top 2-3 most impactful achievements.
-
-**Candidate Data:**
-{candidate_data_json}
-
-**Output Table:**
-You must produce a single Markdown table with the following headers in this exact order: `Score`, `Fit`, `Rationale`, `Matched Skills`, `Missing Skills`, `Top Qualifications`, `Quantifiable Achievements`.
-
-| Score | Fit | Rationale | Matched Skills | Missing Skills | Top Qualifications | Quantifiable Achievements |
-|---|---|---|---|---|---|---|
-| {{score}} | {{fit}} | {{rationale}} | {{matched_skills}} | {{missing_skills}} | {{top_qualifications}} | {{quantifiable_achievements}} |
-
-"""
 # --- New Prompt for Strengths & Weaknesses Analysis ---
 STRENGTHS_WEAKNESSES_PROMPT = """
 You are an expert HR analyst. Based on the following candidate data and JD, provide a concise, professional analysis of the candidate's strengths and weaknesses.
@@ -89,7 +59,6 @@ You are an expert HR analyst. Based on the following candidate data and JD, prov
 **JD:**
 {jd_text}
 """
-
 # --- Helper Functions ---
 @st.cache_data
 def read_uploaded_file(uploaded_file):
@@ -314,7 +283,29 @@ with main_container:
         cv_files = st.file_uploader("Upload one or more PDF/TXT files for CVs", type=["pdf", "txt"], accept_multiple_files=True, key="cv_uploader")
 
     st.markdown("---")
-    if st.button("🚀 Run Evaluation", use_container_width=True):
+    
+    # New: Dynamic Weighting Form
+    st.subheader("3. Customize Scoring Weights")
+    with st.form(key='weight_form'):
+        st.markdown("Adjust the importance of each factor to match your specific job requirements. The total weight will be automatically normalized.")
+        
+        col1_w, col2_w, col3_w, col4_w, col5_w = st.columns(5)
+        
+        with col1_w:
+            matched_skills_w = st.number_input("Matched Skills", min_value=0, max_value=100, value=50, step=5)
+        with col2_w:
+            experience_relevance_w = st.number_input("Experience Relevance", min_value=0, max_value=100, value=20, step=5)
+        with col3_w:
+            qualifications_w = st.number_input("Qualifications", min_value=0, max_value=100, value=15, step=5)
+        with col4_w:
+            seniority_w = st.number_input("Depth & Seniority", min_value=0, max_value=100, value=10, step=5)
+        with col5_w:
+            cv_clarity_w = st.number_input("CV Clarity", min_value=0, max_value=100, value=5, step=5)
+        
+        # New: Button to run the evaluation within the form
+        run_button = st.form_submit_button("🚀 Run Evaluation", use_container_width=True)
+
+    if run_button:
         if not jd_file:
             st.error("Please upload a Job Description to begin.")
         elif not cv_files:
@@ -327,7 +318,42 @@ with main_container:
                 else:
                     evaluated_results = []
                     progress_bar = st.progress(0, text="Starting evaluation...")
-                    
+
+                    # Create a dynamic prompt based on user inputs
+                    dynamic_eval_prompt = f"""
+You are a strict HR evaluation engine. Your task is to evaluate a candidate based on a complete set of extracted data and provide a final, summarized evaluation in a Markdown table.
+Apply heuristics to ensure the score is highly accurate and does not miss any critical connections.
+
+**Evaluation Hierarchy Heuristic:**
+1.  **Prioritize Full-Time Experience:** Evaluate and score the candidate's full-time work experience first. This is the most important factor.
+2.  **Next, Consider Internships:** After full-time experience, evaluate relevant internships.
+3.  **Finally, Consider Projects and Certifications:** Use live projects, open-source work, and certifications as supporting evidence for skills and qualifications.
+
+**Evaluation Rubric:**
+* **Scoring (1-10):** Based on the provided data, apply a final weighted score. The score should reflect the overall balance between matched and missing skills, penalizing the absence of key skills but not disproportionately if a candidate is strong in other areas. The weighting is as follows:
+    * All Matched Skills ({matched_skills_w}%)
+    * Experience Summary Relevance ({experience_relevance_w}%)
+    * All Qualifications & Achievements ({qualifications_w}%)
+    * Overall Depth & Seniority ({seniority_w}%)
+    * CV Clarity ({cv_clarity_w}%)
+* **Fit:** High (>=8), Medium (5-7), Low (<=4).
+* **Rationale:** A single, concise, and factual sentence that **directly explains why the score is high or low**. For high scores, mention key strengths (e.g., matched skills, experience). For low scores, explicitly state which significant skills are missing.
+* **Matched Skills:** A summarized list of the top 3-5 most important matched skills.
+* **Missing Skills:** A summarized list of the top 3-5 most critical missing skills.
+* **Top Qualifications:** A summarized list of the top 2 most impressive qualifications.
+* **Quantifiable Achievements:** A summarized list of the top 2-3 most impactful achievements.
+
+**Candidate Data:**
+{{candidate_data_json}}
+
+**Output Table:**
+You must produce a single Markdown table with the following headers in this exact order: `Score`, `Fit`, `Rationale`, `Matched Skills`, `Missing Skills`, `Top Qualifications`, `Quantifiable Achievements`.
+
+| Score | Fit | Rationale | Matched Skills | Missing Skills | Top Qualifications | Quantifiable Achievements |
+|---|---|---|---|---|---|---|
+| {{score}} | {{fit}} | {{rationale}} | {{matched_skills}} | {{missing_skills}} | {{top_qualifications}} | {{quantifiable_achievements}} |
+"""
+
                     for i, cv_file in enumerate(cv_files):
                         progress_text = f"Processing `{cv_file.name}`..."
                         progress_bar.progress((i) / len(cv_files), text=progress_text)
@@ -357,7 +383,7 @@ with main_container:
                         
                         # --- PHASE 2: Final Evaluation and Reporting ---
                         candidate_data_string = json.dumps(foundational_data, indent=2)
-                        full_prompt_p2 = FINAL_EVALUATION_PROMPT.format(candidate_data_json=candidate_data_string)
+                        full_prompt_p2 = dynamic_eval_prompt.format(candidate_data_json=candidate_data_string)
                         final_table_output = call_gemini_api(full_prompt_p2)
 
                         if isinstance(final_table_output, str) and "API/Network Error" in final_table_output:
