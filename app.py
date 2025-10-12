@@ -1,6 +1,5 @@
-# app.py (full) - deterministic fallback + missing-skill penalty
+# app.py — defensive, full version (drop-in)
 
-# --- 1. Import Libraries ---
 import streamlit as st
 import os
 import json
@@ -9,16 +8,17 @@ import requests
 import csv
 import io
 import re
+import traceback
 import pandas as pd
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
-# --- 2. Configuration ---
+# ---------- Config ----------
 API_KEY = "AIzaSyCLbK8gHVZ5OtIkbAefprWTBYSILVIHMng"
 API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={API_KEY}"
 CV_EXTENSIONS = ('.txt', '.pdf')
 
-# --- Prompts ---
+# ---------- Prompts ----------
 FOUNDATIONAL_ANALYSIS_PROMPT = """
 You are a meticulous data extraction assistant. Your task is to analyze a candidate's CV against a job description (JD) and extract every single piece of relevant information. Do not perform any scoring or filtering. Your output must be a single, complete JSON object.
 
@@ -82,14 +82,35 @@ You are an expert HR analyst. Based on the following candidate data and JD, prov
 {jd_text}
 """
 
-# --- Helper Functions ---
+# ---------- Helpers ----------
+def safe_file_type(uploaded_file):
+    """Return a safe mime type; fall back to extension when needed."""
+    try:
+        t = getattr(uploaded_file, "type", None)
+        if t:
+            return t
+        # fallback: look at extension
+        name = getattr(uploaded_file, "name", "")
+        ext = os.path.splitext(name)[1].lower()
+        if ext == ".txt":
+            return "text/plain"
+        if ext == ".pdf":
+            return "application/pdf"
+        return None
+    except Exception:
+        return None
+
 @st.cache_data
 def read_uploaded_file(uploaded_file):
-    """Reads the content of an uploaded file (TXT or PDF)."""
-    if uploaded_file.type == "text/plain":
-        return uploaded_file.read().decode("utf-8")
-    elif uploaded_file.type == "application/pdf":
-        try:
+    """Reads TXT or PDF file; returns string or None on error."""
+    try:
+        ftype = safe_file_type(uploaded_file)
+        if ftype == "text/plain":
+            raw = uploaded_file.read()
+            if isinstance(raw, bytes):
+                return raw.decode("utf-8", errors="ignore")
+            return str(raw)
+        elif ftype == "application/pdf":
             reader = PdfReader(uploaded_file)
             if reader.is_encrypted:
                 st.warning(f"PDF '{uploaded_file.name}' is encrypted. Skipping.")
@@ -99,58 +120,61 @@ def read_uploaded_file(uploaded_file):
                 return None
             text = ""
             for page in reader.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
-            return text
-        except PdfReadError as e:
-            st.error(f"Corrupted PDF file '{uploaded_file.name}': {e}")
-            return None
-        except Exception as e:
-            st.error(f"General error reading PDF file '{uploaded_file.name}': {e}")
-            return None
-    return None
+                try:
+                    pt = page.extract_text() or ""
+                except Exception:
+                    pt = ""
+                text += pt + "\n"
+            return text.strip()
+        else:
+            # try to read as text safely
+            raw = uploaded_file.read()
+            if isinstance(raw, bytes):
+                return raw.decode("utf-8", errors="ignore")
+            return str(raw)
+    except PdfReadError as e:
+        st.error(f"PDF read error '{uploaded_file.name}': {e}")
+        return None
+    except Exception as e:
+        st.error(f"Error reading file '{getattr(uploaded_file,'name', '')}': {e}")
+        return None
 
 def call_gemini_api(prompt, response_mime_type=None, response_schema=None):
-    """
-    Handles API calls with exponential backoff and specified output format.
-    Returns parsed JSON or raw text. On persistent failure returns a string starting with "API/Network Error:".
-    """
+    """Call LLM with retries. Returns parsed JSON (if requested) or text; returns string starting with 'API/Network Error:' on persistent failure."""
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     if response_mime_type and response_schema:
         payload["generationConfig"] = {
             "responseMimeType": response_mime_type,
             "responseSchema": response_schema
         }
-
-    MAX_RETRIES = 5
+    MAX_RETRIES = 4
     for i in range(MAX_RETRIES):
         try:
-            response = requests.post(API_URL, headers={'Content-Type': 'application/json'}, data=json.dumps(payload))
-            response.raise_for_status()
-            result = response.json()
-            content_part = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text')
+            resp = requests.post(API_URL, headers={"Content-Type": "application/json"}, data=json.dumps(payload), timeout=30)
+            resp.raise_for_status()
+            result = resp.json()
+            # attempt to pull text
+            content_part = (result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text"))
             if not content_part:
-                raise ValueError("API response lacked expected content.")
+                raise ValueError("API response missing content")
             if response_mime_type == "application/json":
-                return json.loads(content_part)
+                # content_part should be a JSON string
+                try:
+                    return json.loads(content_part)
+                except Exception:
+                    return content_part  # fallback - let caller handle
             return content_part
-        except (requests.exceptions.RequestException, ValueError, json.JSONDecodeError) as e:
+        except Exception as e:
             if i < MAX_RETRIES - 1:
-                time.sleep(2**i)
-            else:
-                return f"API/Network Error: {e}"
+                time.sleep(2 ** i)
+                continue
+            return f"API/Network Error: {e}"
     return "API call failed after max retries."
 
 def strip_code_fences(text):
-    """Remove triple-backtick code fences (and optional language tags)."""
     return re.sub(r"```(?:[\s\S]*?)```", lambda m: m.group(0).strip("`"), text, flags=re.MULTILINE)
 
 def find_first_markdown_table_block(lines):
-    """
-    Find first contiguous markdown-table block (header, separator, data...).
-    Returns tuple(start_index, end_index) or (None, None).
-    """
     for i in range(len(lines) - 2):
         header = lines[i].strip()
         sep = lines[i+1].strip()
@@ -164,26 +188,17 @@ def find_first_markdown_table_block(lines):
     return None, None
 
 def parse_markdown_table(table_string, filename):
-    """
-    Robustly parse the first markdown-style table found in table_string.
-    Returns a dict mapping expected CSV-friendly keys, with 'filename' included.
-    """
     if not isinstance(table_string, str):
         return {"filename": filename, "error": "No table string provided."}
-
     txt = table_string.strip()
     if not txt:
         return {"filename": filename, "error": "Empty string."}
-
-    # Remove surrounding triple backticks if present
     txt = re.sub(r'^\s*```[a-zA-Z0-9]*\s*', '', txt)
     txt = re.sub(r'\s*```\s*$', '', txt)
     txt = strip_code_fences(txt)
-
     lines = [ln.rstrip() for ln in txt.splitlines() if ln.strip() != ""]
     start, end = find_first_markdown_table_block(lines)
     if start is None:
-        # fallback: try to use first 3 non-empty lines if they look table-ish
         if len(lines) >= 3 and '|' in lines[0] and '|' in lines[2]:
             header_line = lines[0]
             data_line = lines[2]
@@ -192,26 +207,19 @@ def parse_markdown_table(table_string, filename):
     else:
         header_line = lines[start]
         data_line = lines[start+2] if (start + 2) < end else ""
-
     headers = [h.strip() for h in header_line.split('|') if h.strip()]
     data_row = [d.strip() for d in data_line.split('|') if d.strip()]
-
-    # Align lengths: pad or trim
     if len(headers) != len(data_row):
         if len(data_row) < len(headers):
             data_row += [""] * (len(headers) - len(data_row))
         else:
             data_row = data_row[:len(headers)]
-
     result = dict(zip(headers, data_row))
     result['filename'] = filename
-
-    # Normalize header keys into expected CSV keys
     normalized = {}
     for k, v in result.items():
         norm_k = re.sub(r'[^A-Za-z0-9 ]', '', k).strip()
         normalized[norm_k] = v
-
     mapped = {
         'filename': filename,
         'Score': normalized.get('Score', normalized.get('score', '')),
@@ -222,7 +230,6 @@ def parse_markdown_table(table_string, filename):
         'Top Qualifications': normalized.get('Top Qualifications', normalized.get('TopQualifications', '')),
         'Quantifiable Achievements': normalized.get('Quantifiable Achievements', normalized.get('QuantifiableAchievements', '')),
     }
-
     return mapped
 
 def to_csv_string(results):
@@ -235,36 +242,22 @@ def to_csv_string(results):
     writer.writerows(results)
     return output.getvalue()
 
-# --- Deterministic fallback scoring (used when LLM table missing or malformed) ---
+# Deterministic fallback scoring
 def compute_fallback_score(foundational_data, cv_text, weights, critical_skills_list):
-    """
-    Compute a deterministic score (0-10) and rationale from foundational_data when LLM output is missing.
-    - weights: dict with percentage weights: matched_skills_w, experience_relevance_w, qualifications_w, seniority_w, cv_clarity_w
-    - critical_skills_list: list of critical skills strings (case-insensitive)
-    Returns: (score_float, fit_string, rationale_string)
-    """
-    # Extract fields
     matched = foundational_data.get("matched_skills_full", []) or []
     missing = foundational_data.get("missing_skills_full", []) or []
     top_quals = foundational_data.get("top_qualifications_full", []) or []
     quant_ach = foundational_data.get("quantifiable_achievements_full", []) or []
     exp_summary = (foundational_data.get("relevant_experience_summary") or "").lower()
-
     matched_count = len(matched)
     missing_count = len(missing)
     total_skill_candidates = matched_count + missing_count
     matched_ratio = (matched_count / total_skill_candidates) if total_skill_candidates > 0 else 0.0
-
-    # proxies for other components
-    qual_score = min(1.0, len(top_quals) / 2.0)   # 0..1, 2+ quals => full
-    ach_score = min(1.0, len(quant_ach) / 2.0)    # 0..1
+    qual_score = min(1.0, len(top_quals) / 2.0)
+    ach_score = min(1.0, len(quant_ach) / 2.0)
     exp_presence = 1.0 if exp_summary.strip() else 0.0
-
-    # simple seniority proxy: check for senior keywords
     seniority_keywords = ["senior", "lead", "manager", "principal", "head", "director"]
     seniority_score = 1.0 if any(k in exp_summary for k in seniority_keywords) else 0.0
-
-    # CV clarity proxy: length of CV text
     cv_len = len(cv_text or "")
     if cv_len > 2000:
         cv_clarity_score = 1.0
@@ -274,27 +267,259 @@ def compute_fallback_score(foundational_data, cv_text, weights, critical_skills_
         cv_clarity_score = 0.4
     else:
         cv_clarity_score = 0.15
-
-    # Weights provided as percentages; convert to 0..1 fraction
     mw = weights.get("matched_skills_w", 50) / 100.0
     ew = weights.get("experience_relevance_w", 20) / 100.0
     qw = weights.get("qualifications_w", 15) / 100.0
     sw = weights.get("seniority_w", 10) / 100.0
     cw = weights.get("cv_clarity_w", 5) / 100.0
-
-    # Component contributions (0..1 each)
     comp_matched = matched_ratio
     comp_exp = exp_presence
     comp_qual = qual_score
     comp_sen = seniority_score
     comp_clar = cv_clarity_score
-
-    # Weighted percent (0..1)
     weighted_percent = (comp_matched * mw) + (comp_exp * ew) + (comp_qual * qw) + (comp_sen * sw) + (comp_clar * cw)
-
-    # Convert to 1..10 scale
-    score = 1.0 + weighted_percent * 9.0  # maps 0->1, 1->10
-
-    # Missing-skills penalty: subtract 0.5 points per missing skill, up to 3.0 points
+    score = 1.0 + weighted_percent * 9.0
     penalty_per_missing = 0.5
-    max_pen_
+    max_penalty = 3.0
+    miss_penalty = min(max_penalty, missing_count * penalty_per_missing)
+    score -= miss_penalty
+    if critical_skills_list:
+        missing_criticals = []
+        crit_lower = [c.strip().lower() for c in critical_skills_list if c.strip()]
+        for crit in crit_lower:
+            if not any(crit in (s.lower()) for s in matched):
+                missing_criticals.append(crit)
+        if missing_criticals:
+            score = min(score, 4.0)
+    score = max(0.0, min(10.0, score))
+    if score >= 8.0:
+        fit = "High"
+    elif score >= 5.0:
+        fit = "Medium"
+    else:
+        fit = "Low"
+    rationale_parts = []
+    rationale_parts.append(f"Matched {matched_count} / {total_skill_candidates} JD skills ({int(round(matched_ratio*100))}%).")
+    if top_quals:
+        rationale_parts.append(f"{len(top_quals)} qualifications detected.")
+    if quant_ach:
+        rationale_parts.append(f"{len(quant_ach)} quantifiable achievement(s).")
+    if missing_count:
+        rationale_parts.append(f"Penalty applied for {missing_count} missing skill(s).")
+    if critical_skills_list and 'missing_criticals' in locals() and missing_criticals:
+        rationale_parts.append(f"Critical skill(s) missing: {', '.join(missing_criticals)} -> score capped/penalized.")
+    rationale = " ".join(rationale_parts)
+    return score, fit, rationale
+
+# ---------- Main app wrapped in try/except ----------
+def main():
+    st.set_page_config(page_title="IIM Sirmaur HR Tool", layout="wide", page_icon="🏛️")
+    st.markdown("<div class='iim-header'><h1>IIM Sirmaur</h1><p>AI-Powered HR Evaluation Tool</p></div>", unsafe_allow_html=True)
+
+    main_container = st.container()
+    with main_container:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("1. Upload Job Description")
+            jd_file = st.file_uploader("Upload a PDF or TXT file for the Job Description", type=["pdf", "txt"], key="jd_uploader")
+        with col2:
+            st.subheader("2. Upload Candidate CVs")
+            cv_files = st.file_uploader("Upload one or more PDF/TXT files for CVs", type=["pdf", "txt"], accept_multiple_files=True, key="cv_uploader")
+
+        st.markdown("---")
+        st.subheader("3. Customize Evaluation Rubric")
+        with st.form(key='weight_form'):
+            st.markdown("Adjust the importance of each factor to match your specific job requirements.")
+            col1_w, col2_w, col3_w, col4_w, col5_w = st.columns(5)
+            with col1_w:
+                matched_skills_w = st.slider("Matched Skills (%)", 0, 100, 50, 5)
+            with col2_w:
+                experience_relevance_w = st.slider("Experience Relevance (%)", 0, 100, 20, 5)
+            with col3_w:
+                qualifications_w = st.slider("Qualifications (%)", 0, 100, 15, 5)
+            with col4_w:
+                seniority_w = st.slider("Depth & Seniority (%)", 0, 100, 10, 5)
+            with col5_w:
+                cv_clarity_w = st.slider("CV Clarity (%)", 0, 100, 5, 5)
+            critical_skills = st.text_input("Enter Critical Skills (comma-separated)", placeholder="e.g., Python, SQL, Project Management")
+            run_button = st.form_submit_button("🚀 Run Evaluation", use_container_width=True)
+
+        if run_button:
+            if not jd_file:
+                st.error("Please upload a Job Description to begin.")
+                return
+            if not cv_files:
+                st.warning("Please upload at least one CV file.")
+                return
+
+            jd_text = read_uploaded_file(jd_file)
+            if not jd_text:
+                st.error("Could not read the Job Description. Please check the file.")
+                return
+
+            evaluated_results = []
+            progress_bar = st.progress(0, text="Starting evaluation...")
+
+            final_eval_template = FINAL_EVALUATION_TEMPLATE.format(
+                matched_skills_w=matched_skills_w,
+                experience_relevance_w=experience_relevance_w,
+                qualifications_w=qualifications_w,
+                seniority_w=seniority_w,
+                cv_clarity_w=cv_clarity_w
+            )
+            if critical_skills:
+                final_eval_template += f"\n**Critical Skill Heuristic:**\n* {critical_skills}\n"
+
+            weights = {
+                "matched_skills_w": matched_skills_w,
+                "experience_relevance_w": experience_relevance_w,
+                "qualifications_w": qualifications_w,
+                "seniority_w": seniority_w,
+                "cv_clarity_w": cv_clarity_w
+            }
+            critical_skills_list = [s.strip() for s in critical_skills.split(",")] if critical_skills else []
+
+            for i, cv_file in enumerate(cv_files):
+                try:
+                    progress_bar.progress((i) / len(cv_files), text=f"Processing {cv_file.name}...")
+                    cv_text = read_uploaded_file(cv_file)
+                    if not cv_text:
+                        st.warning(f"Skipping {cv_file.name}: could not read content.")
+                        continue
+
+                    # Phase 1: foundational extraction
+                    schema = {
+                        "type": "OBJECT",
+                        "properties": {
+                            "matched_skills_full": {"type": "ARRAY", "items": {"type": "STRING"}},
+                            "missing_skills_full": {"type": "ARRAY", "items": {"type": "STRING"}},
+                            "top_qualifications_full": {"type": "ARRAY", "items": {"type": "STRING"}},
+                            "quantifiable_achievements_full": {"type": "ARRAY", "items": {"type": "STRING"}},
+                            "relevant_experience_summary": {"type": "STRING"}
+                        }
+                    }
+                    full_prompt_p1 = FOUNDATIONAL_ANALYSIS_PROMPT.format(jd_text=jd_text, cv_text=cv_text)
+                    foundational_data = call_gemini_api(full_prompt_p1, "application/json", schema)
+                    if isinstance(foundational_data, str):
+                        st.warning(f"Foundational extraction failed for {cv_file.name}, continuing to fallback: {foundational_data}")
+                        # fallback to minimal empty structure
+                        foundational_data = {
+                            "matched_skills_full": [],
+                            "missing_skills_full": [],
+                            "top_qualifications_full": [],
+                            "quantifiable_achievements_full": [],
+                            "relevant_experience_summary": ""
+                        }
+
+                    candidate_data_string = json.dumps(foundational_data, indent=2)
+
+                    # Phase 2: ask LLM to produce final table (may be malformed)
+                    final_prompt_with_data = final_eval_template.replace("{candidate_data_json}", candidate_data_string)
+                    final_table_output = call_gemini_api(final_prompt_with_data)
+
+                    parsed_data = {}
+                    parsed_from_llm = False
+                    if isinstance(final_table_output, str) and final_table_output and not final_table_output.startswith("API/Network Error"):
+                        parsed_try = parse_markdown_table(final_table_output, cv_file.name)
+                        if parsed_try and 'error' not in parsed_try and (parsed_try.get("Score") or parsed_try.get("Fit")):
+                            parsed_data = parsed_try
+                            parsed_from_llm = True
+
+                    if not parsed_from_llm:
+                        fb_score, fb_fit, fb_rationale = compute_fallback_score(foundational_data, cv_text, weights, critical_skills_list)
+                        if float(fb_score).is_integer():
+                            score_str = str(int(fb_score))
+                        else:
+                            score_str = str(round(fb_score, 1))
+                        parsed_data = {
+                            "filename": cv_file.name,
+                            "Score": score_str,
+                            "Fit": fb_fit,
+                            "Rationale": fb_rationale,
+                            "Matched Skills": ", ".join(foundational_data.get("matched_skills_full", []) or []),
+                            "Missing Skills": ", ".join(foundational_data.get("missing_skills_full", []) or []),
+                            "Top Qualifications": ", ".join(foundational_data.get("top_qualifications_full", []) or []),
+                            "Quantifiable Achievements": "; ".join(foundational_data.get("quantifiable_achievements_full", []) or [])
+                        }
+                        # ensure a consistent LLM-table-like preview
+                        final_table_output = (
+                            "| Score | Fit | Rationale | Matched Skills | Missing Skills | Top Qualifications | Quantifiable Achievements |\n"
+                            "|---|---|---|---|---|---|---|\n"
+                            f"| {parsed_data['Score']} | {parsed_data['Fit']} | {parsed_data['Rationale'][:80]}... | {parsed_data['Matched Skills'][:40]} | {parsed_data['Missing Skills'][:40]} | {parsed_data['Top Qualifications'][:40]} | {parsed_data['Quantifiable Achievements'][:40]} |"
+                        )
+
+                    score_header = parsed_data.get("Score") or "N/A"
+                    fit_header = parsed_data.get("Fit") or "N/A"
+
+                    with st.expander(f"**{cv_file.name}** - Score: {score_header} | Fit: {fit_header}"):
+                        st.markdown(final_table_output, unsafe_allow_html=True)
+
+                        analysis_prompt = STRENGTHS_WEAKNESSES_PROMPT.format(candidate_data_json=candidate_data_string, jd_text=jd_text)
+                        analysis_result = call_gemini_api(analysis_prompt)
+                        st.markdown(f"**Parsed summary for:** {parsed_data.get('filename')}")
+                        st.write(f"Score: {parsed_data.get('Score')}")
+                        st.write(f"Fit: {parsed_data.get('Fit')}")
+                        st.write("Matched Skills:", parsed_data.get("Matched Skills"))
+                        st.write("Missing Skills:", parsed_data.get("Missing Skills"))
+                        st.write("Top Qualifications:", parsed_data.get("Top Qualifications"))
+                        st.write("Quantifiable Achievements:", parsed_data.get("Quantifiable Achievements"))
+
+                        st.subheader("Strengths & Weaknesses Analysis")
+                        if isinstance(analysis_result, str) and analysis_result.startswith("API/Network Error"):
+                            st.warning("Could not generate detailed analysis.")
+                        else:
+                            st.markdown(analysis_result)
+
+                        st.markdown("### Raw Data Extracted")
+                        st.json(foundational_data)
+
+                    evaluated_results.append({
+                        "filename": parsed_data.get("filename", cv_file.name),
+                        "Score": parsed_data.get("Score", ""),
+                        "Fit": parsed_data.get("Fit", ""),
+                        "Rationale": parsed_data.get("Rationale", ""),
+                        "Matched Skills": parsed_data.get("Matched Skills", ""),
+                        "Missing Skills": parsed_data.get("Missing Skills", ""),
+                        "Top Qualifications": parsed_data.get("Top Qualifications", ""),
+                        "Quantifiable Achievements": parsed_data.get("Quantifiable Achievements", "")
+                    })
+
+                except Exception as e:
+                    # show per-file exception but continue with remaining files
+                    st.error(f"Error processing {getattr(cv_file,'name', 'file')}: {e}")
+                    st.text(traceback.format_exc())
+                    continue
+
+                progress_bar.progress((i + 1) / len(cv_files), text="All files processed!")
+
+            # Final report
+            st.markdown("---")
+            st.subheader("Final Evaluation Report")
+            if evaluated_results:
+                df_results = pd.DataFrame(evaluated_results)
+                df_results["Score"] = pd.to_numeric(df_results.get("Score", None), errors='coerce')
+                if 'filename' in df_results.columns:
+                    cols = ['filename'] + [c for c in df_results.columns if c != 'filename']
+                    df_results = df_results[cols]
+                df_results = df_results.sort_values(by="Score", ascending=False, na_position='last')
+                high_count = len(df_results[df_results['Fit'] == 'High']) if 'Fit' in df_results.columns else 0
+                medium_count = len(df_results[df_results['Fit'] == 'Medium']) if 'Fit' in df_results.columns else 0
+                low_count = len(df_results[df_results['Fit'] == 'Low']) if 'Fit' in df_results.columns else 0
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.metric("High Fit", high_count)
+                with c2:
+                    st.metric("Medium Fit", medium_count)
+                with c3:
+                    st.metric("Low Fit", low_count)
+                st.dataframe(df_results, use_container_width=True)
+                st.download_button("Download CSV Report", data=to_csv_string(evaluated_results), file_name="hr_evaluation_report.csv", mime="text/csv")
+            else:
+                st.info("No results to display (no CVs processed).")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        st.error("Fatal error running app. See traceback below.")
+        st.text(traceback.format_exc())
