@@ -324,7 +324,7 @@ with main_container:
                 else:
                     evaluated_results = []
                     progress_bar = st.progress(0, text="Starting evaluation...")
-                    
+
                     # Create a dynamic prompt based on user inputs
                     dynamic_eval_prompt = f"""
 You are a strict HR evaluation engine. Your task is to evaluate a candidate based on a complete set of extracted data and provide a final, summarized evaluation in a Markdown table.
@@ -395,7 +395,7 @@ You must produce a single Markdown table with the following headers in this exac
                         
                         # --- PHASE 2: Final Evaluation and Reporting ---
                         candidate_data_string = json.dumps(foundational_data, indent=2)
-                        final_table_output = call_gemini_api(dynamic_eval_prompt.format(candidate_data_json=candidate_data_string))
+                        final_table_output = call_gemini_api(dynamic_eval_prompt.format(candidate_data_json=candidate_data_string, matched_skills_w=matched_skills_w, experience_relevance_w=experience_relevance_w, qualifications_w=qualifications_w, seniority_w=seniority_w, cv_clarity_w=cv_clarity_w))
 
                         if isinstance(final_table_output, str) and "API/Network Error" in final_table_output:
                             st.error(f"Final Evaluation for {cv_file.name} failed: {final_table_output}")
