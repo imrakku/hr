@@ -285,22 +285,28 @@ with main_container:
     st.markdown("---")
     
     # New: Dynamic Weighting Form
-    st.subheader("3. Customize Scoring Weights")
+    st.subheader("3. Customize Evaluation Rubric")
     with st.form(key='weight_form'):
-        st.markdown("Adjust the importance of each factor to match your specific job requirements. The total weight will be automatically normalized.")
+        st.markdown("Adjust the importance of each factor to match your specific job requirements.")
         
         col1_w, col2_w, col3_w, col4_w, col5_w = st.columns(5)
         
         with col1_w:
-            matched_skills_w = st.number_input("Matched Skills", min_value=0, max_value=100, value=50, step=5)
+            matched_skills_w = st.slider("Matched Skills (%)", min_value=0, max_value=100, value=50, step=5)
         with col2_w:
-            experience_relevance_w = st.number_input("Experience Relevance", min_value=0, max_value=100, value=20, step=5)
+            experience_relevance_w = st.slider("Experience Relevance (%)", min_value=0, max_value=100, value=20, step=5)
         with col3_w:
-            qualifications_w = st.number_input("Qualifications", min_value=0, max_value=100, value=15, step=5)
+            qualifications_w = st.slider("Qualifications (%)", min_value=0, max_value=100, value=15, step=5)
         with col4_w:
-            seniority_w = st.number_input("Depth & Seniority", min_value=0, max_value=100, value=10, step=5)
+            seniority_w = st.slider("Depth & Seniority (%)", min_value=0, max_value=100, value=10, step=5)
         with col5_w:
-            cv_clarity_w = st.number_input("CV Clarity", min_value=0, max_value=100, value=5, step=5)
+            cv_clarity_w = st.slider("CV Clarity (%)", min_value=0, max_value=100, value=5, step=5)
+            
+        # New: Input for Critical Skills
+        critical_skills = st.text_input(
+            "Enter Critical Skills (comma-separated)",
+            placeholder="e.g., Python, SQL, Project Management"
+        )
         
         # New: Button to run the evaluation within the form
         run_button = st.form_submit_button("🚀 Run Evaluation", use_container_width=True)
@@ -318,7 +324,7 @@ with main_container:
                 else:
                     evaluated_results = []
                     progress_bar = st.progress(0, text="Starting evaluation...")
-
+                    
                     # Create a dynamic prompt based on user inputs
                     dynamic_eval_prompt = f"""
 You are a strict HR evaluation engine. Your task is to evaluate a candidate based on a complete set of extracted data and provide a final, summarized evaluation in a Markdown table.
@@ -353,6 +359,12 @@ You must produce a single Markdown table with the following headers in this exac
 |---|---|---|---|---|---|---|
 | {{score}} | {{fit}} | {{rationale}} | {{matched_skills}} | {{missing_skills}} | {{top_qualifications}} | {{quantifiable_achievements}} |
 """
+                    # Adding a critical skill heuristic to the prompt
+                    if critical_skills:
+                        dynamic_eval_prompt += f"""
+**Critical Skill Heuristic:**
+* A candidate missing any of the following skills must have their score severely penalized, regardless of other factors. The score must be 4 or lower if any of these are missing: **{critical_skills}**.
+"""
 
                     for i, cv_file in enumerate(cv_files):
                         progress_text = f"Processing `{cv_file.name}`..."
@@ -383,8 +395,7 @@ You must produce a single Markdown table with the following headers in this exac
                         
                         # --- PHASE 2: Final Evaluation and Reporting ---
                         candidate_data_string = json.dumps(foundational_data, indent=2)
-                        full_prompt_p2 = dynamic_eval_prompt.format(candidate_data_json=candidate_data_string)
-                        final_table_output = call_gemini_api(full_prompt_p2)
+                        final_table_output = call_gemini_api(dynamic_eval_prompt.format(candidate_data_json=candidate_data_string))
 
                         if isinstance(final_table_output, str) and "API/Network Error" in final_table_output:
                             st.error(f"Final Evaluation for {cv_file.name} failed: {final_table_output}")
