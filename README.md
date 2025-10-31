@@ -1,5 +1,14 @@
 🧠 HR Candidate Evaluation Tool
 AI-Powered Candidate Screening Solution for IIM Sirmaur
+
+## 🆕 New: Google Sheets Q&A Agent
+
+**Now includes an AI-powered agent that connects to Google Sheets and answers questions about your data!**
+
+📊 **Quick Start:** See `QUICKSTART_SHEETS_AGENT.md` or run `python3 demo_simple.py`
+
+---
+
 🌟 Overview
 
 The HR Candidate Evaluation Tool is a professional, AI-driven application built to streamline the candidate screening process for placements at IIM Sirmaur.
