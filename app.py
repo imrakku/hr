@@ -15,7 +15,7 @@ from pypdf.errors import PdfReadError
 # ---------- Config ----------
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 if not OPENAI_API_KEY:
-    OPENAI_API_KEY = "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"  # dev only; set OPENAI_API_KEY env var in production
+    OPENAI_API_KEY = "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"  # dev only; set OPENAI_API_KEY env var in production
 
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 MODEL_NAME = "gpt-4.1-mini"  # change if you prefer another available model
