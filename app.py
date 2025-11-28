@@ -17,7 +17,7 @@ from pypdf.errors import PdfReadError
 # Prefer env var in production; for local quick-and-dirty, you can paste your key below.
 API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 if not API_KEY:
-    API_KEY = "YOUR_GEMINI_API_KEY_HERE"  # <- replace with your key if not using env var
+    API_KEY = "AIzaSyAbCqQHfLqL6Km5WEygU4EW2JJmBjZPNE8"  # <- replace with your key if not using env var
 
 BASE_URL = "https://generativelanguage.googleapis.com"
 API_VERSION = "v1"  # IMPORTANT: v1, not v1beta
