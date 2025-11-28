@@ -18,7 +18,7 @@ if not OPENAI_API_KEY:
     OPENAI_API_KEY = "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"  # dev only; set OPENAI_API_KEY env var in production
 
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
-MODEL_NAME = "gpt-4.1-mini"  # change if you prefer another model available to your key
+MODEL_NAME = "gpt-4.1-mini"  # change if you prefer another available model
 CV_EXTENSIONS = (".txt", ".pdf")
 
 # ---------- Prompts ----------
@@ -38,10 +38,10 @@ IMPORTANT:
 }}
 
 Instructions:
-1. matched_skills_full: list all skills from the JD that appear in the CV (exact or clear synonyms).
+1. matched_skills_full: list all skills from the JD that appear in the CV (exact matches or clear synonyms).
 2. missing_skills_full: list skills that are in the JD but not present in the CV.
 3. top_qualifications_full: list relevant degrees, certifications, licenses mentioned in the CV.
-4. quantifiable_achievements_full: list all achievements that include numbers, percentages, currency, or measurable metrics.
+4. quantifiable_achievements_full: list achievements that include numbers, percentages, currency, or measurable metrics.
 5. relevant_experience_summary: 1-2 paragraph summary (concise) of the candidate's work history relative to the JD.
 
 Return only the JSON object.
@@ -53,6 +53,7 @@ CV:
 {cv_text}
 """
 
+# NOTE: candidate_data_json placeholder must remain literal in the template when we .format the weights.
 FINAL_EVALUATION_TEMPLATE = """
 You are an HR evaluation engine. Evaluate the candidate based on the extracted JSON candidate data and produce a SINGLE Markdown table with headers:
 
@@ -62,9 +63,9 @@ Use the rubric:
 * Scoring (1-10): All Matched Skills ({matched_skills_w}%), Experience Relevance ({experience_relevance_w}%), Qualifications & Achievements ({qualifications_w}%), Seniority ({seniority_w}%), CV Clarity ({cv_clarity_w}%).
 
 Candidate data:
-{candidate_data_json}
+{{candidate_data_json}}
 
-Produce exactly one Markdown table row representing the evaluation (table headers + one data row).
+Produce exactly one Markdown table (headers + one data row).
 """
 
 STRENGTHS_WEAKNESSES_PROMPT = """
@@ -82,7 +83,6 @@ JD:
 
 # ---------- Helpers ----------
 def safe_file_type(uploaded_file):
-    """Return a safe mime type; fall back to extension when needed."""
     try:
         t = getattr(uploaded_file, "type", None)
         if t:
@@ -136,29 +136,21 @@ def read_uploaded_file(uploaded_file):
         return None
 
 def strip_code_fences(text):
-    # Removes triple-backtick code fences and plain surrounding text artifacts
     if not isinstance(text, str):
         return text
-    # Try to extract JSON block if inside code fence
     m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, flags=re.IGNORECASE)
     if m:
         return m.group(1).strip()
-    # Otherwise remove any leading/trailing backticks
     return text.strip().strip("` \n\r\t")
 
 def extract_json_from_text(text):
     text = strip_code_fences(text)
-    # try to locate first { ... } JSON block
     first_brace = text.find("{")
-    if first_brace >= 0:
-        snippet = text[first_brace:]
-    else:
-        snippet = text
-    # attempt to fix common issues and parse
+    snippet = text[first_brace:] if first_brace >= 0 else text
     try:
         return json.loads(snippet)
     except Exception:
-        # try to find a balanced JSON substring
+        # attempt to find balanced JSON substring
         depth = 0
         start = None
         for i, ch in enumerate(snippet):
@@ -174,10 +166,8 @@ def extract_json_from_text(text):
                         return json.loads(candidate)
                     except Exception:
                         pass
-        # last resort: try to eval-like with replacements (risky) -> skip
-    return None
+        return None
 
-# Markdown table parsing (keeps your previous logic)
 def find_first_markdown_table_block(lines):
     for i in range(len(lines) - 2):
         header = lines[i].strip()
@@ -199,7 +189,6 @@ def parse_markdown_table(table_string, filename):
         return {"filename": filename, "error": "Empty string."}
     txt = re.sub(r'^\s*```[a-zA-Z0-9]*\s*', '', txt)
     txt = re.sub(r'\s*```\s*$', '', txt)
-    # remove code fences inside
     txt = strip_code_fences(txt)
     lines = [ln.rstrip() for ln in txt.splitlines() if ln.strip() != ""]
     start, end = find_first_markdown_table_block(lines)
@@ -249,11 +238,6 @@ def to_csv_string(results):
 
 # ---------- OpenAI wrapper ----------
 def call_openai_api(prompt, as_json=False, max_retries=3, model=MODEL_NAME, temperature=0.0):
-    """
-    Calls OpenAI Chat Completions.
-    - as_json=True: tries to parse the assistant content as JSON and returns that JSON (or an error string).
-    - returns either (parsed JSON) when as_json True and parse successful, or the raw assistant text, or an error string starting with 'API/Network Error:'.
-    """
     if not OPENAI_API_KEY or OPENAI_API_KEY == "YOUR_OPENAI_KEY_HERE":
         return "API/Network Error: OPENAI_KEY_INVALID"
 
@@ -275,15 +259,12 @@ def call_openai_api(prompt, as_json=False, max_retries=3, model=MODEL_NAME, temp
         try:
             resp = requests.post(OPENAI_API_URL, headers=headers, data=json.dumps(payload), timeout=60)
             if resp.status_code != 200:
-                # Provide helpful error body
                 try:
                     body = resp.json()
                 except Exception:
                     body = resp.text
                 raise RuntimeError(f"OpenAI API error {resp.status_code}: {body}")
-
             data = resp.json()
-            # expect typical structure: choices[0].message.content
             choices = data.get("choices") or []
             if not choices:
                 raise ValueError(f"No choices returned: {data}")
@@ -291,7 +272,6 @@ def call_openai_api(prompt, as_json=False, max_retries=3, model=MODEL_NAME, temp
             if as_json:
                 parsed = extract_json_from_text(content)
                 if parsed is None:
-                    # If parse failed, return error string so caller uses fallback
                     return f"API/Network Error: OPENAI_INVALID_JSON_RESPONSE: {content[:500]}"
                 return parsed
             return content
@@ -346,10 +326,8 @@ def compute_fallback_score(foundational_data, cv_text, weights, critical_skills_
 
     weighted_percent = (comp_matched * mw) + (comp_exp * ew) + (comp_qual * qw) + (comp_sen * sw) + (comp_clar * cw)
 
-    # Map to 3-10 range
     score = 3.0 + weighted_percent * 7.0
 
-    # Soft penalties
     penalty_per_missing = 0.2
     max_penalty = 1.5
     miss_penalty = min(max_penalty, missing_count * penalty_per_missing)
@@ -480,10 +458,8 @@ def main():
                     full_prompt_p1 = FOUNDATIONAL_ANALYSIS_PROMPT.format(jd_text=jd_text, cv_text=cv_text)
                     fd = call_openai_api(full_prompt_p1, as_json=True)
                     if isinstance(fd, str) and fd.startswith("API/Network Error"):
-                        # API failed or returned non-JSON; fallback
                         st.info(f"Foundational extraction failed for {cv_file.name}; using deterministic fallback scoring.\n\n{fd}")
                     else:
-                        # fd should be parsed JSON
                         if isinstance(fd, dict):
                             foundational_data = {
                                 "matched_skills_full": fd.get("matched_skills_full", []) or [],
@@ -510,7 +486,6 @@ def main():
                             parsed_from_llm = True
 
                     if not parsed_from_llm:
-                        # Use deterministic fallback scoring
                         fb_score, fb_fit, fb_rationale = compute_fallback_score(foundational_data, cv_text, weights, critical_skills_list)
                         if float(fb_score).is_integer():
                             score_str = str(int(fb_score))
@@ -542,7 +517,6 @@ def main():
                     with st.expander(f"**{cv_file.name}** - Score: {score_header} | Fit: {fit_header}"):
                         st.markdown(final_table_output, unsafe_allow_html=True)
 
-                        # Strengths & weaknesses (optional, best-effort)
                         analysis_prompt = STRENGTHS_WEAKNESSES_PROMPT.format(candidate_data_json=candidate_data_string, jd_text=jd_text)
                         analysis_result = call_openai_api(analysis_prompt, as_json=False)
                         st.markdown(f"**Parsed summary for:** {parsed_data.get('filename')}")
