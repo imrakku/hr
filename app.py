@@ -4,7 +4,6 @@ import streamlit as st
 import os
 import json
 import time
-import requests
 import csv
 import io
 import re
@@ -12,11 +11,15 @@ import traceback
 import pandas as pd
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
+from google import genai  # <-- NEW
 
 # ---------- Config ----------
-API_KEY = "AIzaSyDrQBNB_o6vpqLKfBS0AXlTmOB_14jLyUI"
-API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={API_KEY}"
+API_KEY = "AIzaSyDl4Xqf-_u3wEtemn4F73HQRIOA5UIbty8"
+MODEL_NAME = "gemini-2.5-flash"  # uses the same style as your working example
 CV_EXTENSIONS = ('.txt', '.pdf')
+
+# init Gemini client
+genai_client = genai.Client(api_key=API_KEY)
 
 # ---------- Prompts ----------
 FOUNDATIONAL_ANALYSIS_PROMPT = """
@@ -139,37 +142,64 @@ def read_uploaded_file(uploaded_file):
         st.error(f"Error reading file '{getattr(uploaded_file,'name', '')}': {e}")
         return None
 
+
 def call_gemini_api(prompt, response_mime_type=None, response_schema=None):
-    """Call LLM with retries. Returns parsed JSON (if requested) or text; returns string starting with 'API/Network Error:' on persistent failure."""
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    """
+    Call Gemini using google.genai client with retries.
+    - If response_mime_type == 'application/json', tries to json.loads(resp.text)
+    - Otherwise returns resp.text
+    - On persistent failure returns string starting with 'API/Network Error:'
+    """
+    contents = [{"parts": [{"text": prompt}]}]
+
+    # config for JSON schema if requested
+    config = None
     if response_mime_type and response_schema:
-        payload["generationConfig"] = {
-            "responseMimeType": response_mime_type,
-            "responseSchema": response_schema
+        config = {
+            "response_mime_type": response_mime_type,
+            "response_schema": response_schema
         }
+
     MAX_RETRIES = 4
-    for i in range(MAX_RETRIES):
+    backoff = 1
+    for attempt in range(MAX_RETRIES):
         try:
-            resp = requests.post(API_URL, headers={"Content-Type": "application/json"}, data=json.dumps(payload), timeout=30)
-            resp.raise_for_status()
-            result = resp.json()
-            # attempt to pull text
-            content_part = (result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text"))
+            if config:
+                resp = genai_client.models.generate_content(
+                    model=MODEL_NAME,
+                    contents=contents,
+                    config=config
+                )
+            else:
+                resp = genai_client.models.generate_content(
+                    model=MODEL_NAME,
+                    contents=contents
+                )
+
+            # google-genai exposes resp.text for the concatenated text
+            content_part = getattr(resp, "text", None)
             if not content_part:
-                raise ValueError("API response missing content")
+                # worst case fallback
+                content_part = str(resp)
+
             if response_mime_type == "application/json":
-                # content_part should be a JSON string
                 try:
                     return json.loads(content_part)
                 except Exception:
-                    return content_part  # fallback - let caller handle
+                    # let caller handle raw text if it isn't valid JSON
+                    return content_part
+
             return content_part
+
         except Exception as e:
-            if i < MAX_RETRIES - 1:
-                time.sleep(2 ** i)
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(backoff)
+                backoff *= 2
                 continue
             return f"API/Network Error: {e}"
+
     return "API call failed after max retries."
+
 
 def strip_code_fences(text):
     return re.sub(r"```(?:[\s\S]*?)```", lambda m: m.group(0).strip("`"), text, flags=re.MULTILINE)
@@ -249,15 +279,19 @@ def compute_fallback_score(foundational_data, cv_text, weights, critical_skills_
     top_quals = foundational_data.get("top_qualifications_full", []) or []
     quant_ach = foundational_data.get("quantifiable_achievements_full", []) or []
     exp_summary = (foundational_data.get("relevant_experience_summary") or "").lower()
+
     matched_count = len(matched)
     missing_count = len(missing)
     total_skill_candidates = matched_count + missing_count
     matched_ratio = (matched_count / total_skill_candidates) if total_skill_candidates > 0 else 0.0
+
     qual_score = min(1.0, len(top_quals) / 2.0)
     ach_score = min(1.0, len(quant_ach) / 2.0)
     exp_presence = 1.0 if exp_summary.strip() else 0.0
+
     seniority_keywords = ["senior", "lead", "manager", "principal", "head", "director"]
     seniority_score = 1.0 if any(k in exp_summary for k in seniority_keywords) else 0.0
+
     cv_len = len(cv_text or "")
     if cv_len > 2000:
         cv_clarity_score = 1.0
@@ -267,22 +301,27 @@ def compute_fallback_score(foundational_data, cv_text, weights, critical_skills_
         cv_clarity_score = 0.4
     else:
         cv_clarity_score = 0.15
+
     mw = weights.get("matched_skills_w", 50) / 100.0
     ew = weights.get("experience_relevance_w", 20) / 100.0
     qw = weights.get("qualifications_w", 15) / 100.0
     sw = weights.get("seniority_w", 10) / 100.0
     cw = weights.get("cv_clarity_w", 5) / 100.0
+
     comp_matched = matched_ratio
     comp_exp = exp_presence
     comp_qual = qual_score
     comp_sen = seniority_score
     comp_clar = cv_clarity_score
+
     weighted_percent = (comp_matched * mw) + (comp_exp * ew) + (comp_qual * qw) + (comp_sen * sw) + (comp_clar * cw)
     score = 1.0 + weighted_percent * 9.0
+
     penalty_per_missing = 0.5
     max_penalty = 3.0
     miss_penalty = min(max_penalty, missing_count * penalty_per_missing)
     score -= miss_penalty
+
     if critical_skills_list:
         missing_criticals = []
         crit_lower = [c.strip().lower() for c in critical_skills_list if c.strip()]
@@ -291,13 +330,16 @@ def compute_fallback_score(foundational_data, cv_text, weights, critical_skills_
                 missing_criticals.append(crit)
         if missing_criticals:
             score = min(score, 4.0)
+
     score = max(0.0, min(10.0, score))
+
     if score >= 8.0:
         fit = "High"
     elif score >= 5.0:
         fit = "Medium"
     else:
         fit = "Low"
+
     rationale_parts = []
     rationale_parts.append(f"Matched {matched_count} / {total_skill_candidates} JD skills ({int(round(matched_ratio*100))}%).")
     if top_quals:
@@ -309,6 +351,7 @@ def compute_fallback_score(foundational_data, cv_text, weights, critical_skills_
     if critical_skills_list and 'missing_criticals' in locals() and missing_criticals:
         rationale_parts.append(f"Critical skill(s) missing: {', '.join(missing_criticals)} -> score capped/penalized.")
     rationale = " ".join(rationale_parts)
+
     return score, fit, rationale
 
 # ---------- Main app wrapped in try/except ----------
@@ -505,6 +548,7 @@ def main():
                 high_count = len(df_results[df_results['Fit'] == 'High']) if 'Fit' in df_results.columns else 0
                 medium_count = len(df_results[df_results['Fit'] == 'Medium']) if 'Fit' in df_results.columns else 0
                 low_count = len(df_results[df_results['Fit'] == 'Low']) if 'Fit' in df_results.columns else 0
+
                 c1, c2, c3 = st.columns(3)
                 with c1:
                     st.metric("High Fit", high_count)
@@ -512,6 +556,7 @@ def main():
                     st.metric("Medium Fit", medium_count)
                 with c3:
                     st.metric("Low Fit", low_count)
+
                 st.dataframe(df_results, use_container_width=True)
                 st.download_button("Download CSV Report", data=to_csv_string(evaluated_results), file_name="hr_evaluation_report.csv", mime="text/csv")
             else:
