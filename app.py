@@ -14,7 +14,7 @@ from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
 # ---------- Config ----------
-API_KEY = "AIzaSyAbCqQHfLqL6Km5WEygU4EW2JJmBjZPNE8"
+API_KEY = "AIzaSyDrQBNB_o6vpqLKfBS0AXlTmOB_14jLyUI"
 API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={API_KEY}"
 CV_EXTENSIONS = ('.txt', '.pdf')
 
