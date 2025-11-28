@@ -1,4 +1,5 @@
-# app.py — IIM Sirmaur HR Tool (OpenAI backend, balanced scoring)
+# app.py — defensive, full version (drop-in)
+
 import streamlit as st
 import os
 import json
@@ -13,80 +14,82 @@ from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
 # ---------- Config ----------
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
-if not OPENAI_API_KEY:
-    OPENAI_API_KEY = "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"  # dev only; set OPENAI_API_KEY env var in production
-
-OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
-MODEL_NAME = "gpt-4.1-mini"  # change if you prefer another available model
-CV_EXTENSIONS = (".txt", ".pdf")
+API_KEY = "AIzaSyCLbK8gHVZ5OtIkbAefprWTBYSILVIHMng"
+API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={API_KEY}"
+CV_EXTENSIONS = ('.txt', '.pdf')
 
 # ---------- Prompts ----------
 FOUNDATIONAL_ANALYSIS_PROMPT = """
-You are a meticulous data extraction assistant. Your task is to analyze a candidate's CV against a job description (JD) and extract every single piece of relevant information.
+You are a meticulous data extraction assistant. Your task is to analyze a candidate's CV against a job description (JD) and extract every single piece of relevant information. Do not perform any scoring or filtering. Your output must be a single, complete JSON object.
 
-IMPORTANT:
-- Output exactly ONE valid JSON object, and nothing else (no commentary, no code fences).
-- The JSON must follow this shape (keys must exist; arrays may be empty):
+**JSON Schema:**
+`{{
+  "matched_skills_full": [STRING],
+  "missing_skills_full": [STRING],
+  "top_qualifications_full": [STRING],
+  "quantifiable_achievements_full": [STRING],
+  "relevant_experience_summary": STRING
+}}`
 
-{{
-  "matched_skills_full": [],
-  "missing_skills_full": [],
-  "top_qualifications_full": [],
-  "quantifiable_achievements_full": [],
-  "relevant_experience_summary": ""
-}}
+**Instructions:**
+1.  `matched_skills_full`: List all skills from the JD present in the CV.
+2.  `missing_skills_full`: List all skills from the JD not present in the CV.
+3.  `top_qualifications_full`: List all relevant degrees, certifications, and licenses.
+4.  `quantifiable_achievements_full`: **Find and list all achievements with numbers, percentages, currency, or metrics.**
+5.  `relevant_experience_summary`: Provide a 1-2 paragraph summary of the candidate's work history as it relates directly to the JD's requirements.
 
-Instructions:
-1. matched_skills_full: list all skills from the JD that appear in the CV (exact matches or clear synonyms).
-2. missing_skills_full: list skills that are in the JD but not present in the CV.
-3. top_qualifications_full: list relevant degrees, certifications, licenses mentioned in the CV.
-4. quantifiable_achievements_full: list achievements that include numbers, percentages, currency, or measurable metrics.
-5. relevant_experience_summary: 1-2 paragraph summary (concise) of the candidate's work history relative to the JD.
-
-Return only the JSON object.
-
-JD:
+**JD:**
 {jd_text}
 
-CV:
+**CV:**
 {cv_text}
 """
 
-# NOTE: candidate_data_json placeholder must remain literal in the template when we .format the weights.
 FINAL_EVALUATION_TEMPLATE = """
-You are an HR evaluation engine. Evaluate the candidate based on the extracted JSON candidate data and produce a SINGLE Markdown table with headers:
+You are a strict HR evaluation engine. Your task is to evaluate a candidate based on a complete set of extracted data and provide a final, summarized evaluation in a Markdown table.
+Apply heuristics to ensure the score is highly accurate and does not miss any critical connections.
 
-Score | Fit | Rationale | Matched Skills | Missing Skills | Top Qualifications | Quantifiable Achievements
+**Evaluation Rubric:**
+* **Scoring (1-10):**
+    * All Matched Skills ({matched_skills_w}%)
+    * Experience Summary Relevance ({experience_relevance_w}%)
+    * All Qualifications & Achievements ({qualifications_w}%)
+    * Overall Depth & Seniority ({seniority_w}%)
+    * CV Clarity ({cv_clarity_w}%)
 
-Use the rubric:
-* Scoring (1-10): All Matched Skills ({matched_skills_w}%), Experience Relevance ({experience_relevance_w}%), Qualifications & Achievements ({qualifications_w}%), Seniority ({seniority_w}%), CV Clarity ({cv_clarity_w}%).
-
-Candidate data:
+**Candidate Data:**
 {{candidate_data_json}}
 
-Produce exactly one Markdown table (headers + one data row).
+**Output Table:**
+You must produce a single Markdown table with headers: `Score`, `Fit`, `Rationale`, `Matched Skills`, `Missing Skills`, `Top Qualifications`, `Quantifiable Achievements`.
+
+| Score | Fit | Rationale | Matched Skills | Missing Skills | Top Qualifications | Quantifiable Achievements |
+|---|---|---|---|---|---|---|
+| {{score}} | {{fit}} | {{rationale}} | {{matched_skills}} | {{missing_skills}} | {{top_qualifications}} | {{quantifiable_achievements}} |
 """
 
 STRENGTHS_WEAKNESSES_PROMPT = """
-You are an expert HR analyst. Given this candidate data and the JD, provide:
+You are an expert HR analyst. Based on the following candidate data and JD, provide a concise, professional analysis of the candidate's strengths and weaknesses.
 
-- Strengths: a single paragraph (2-3 sentences) summarizing top strengths.
-- Weaknesses: a single paragraph (2-3 sentences) summarizing key weaknesses.
+**Instructions:**
+* **Strengths:** Write a single paragraph (2-3 sentences) summarizing the candidate's top strengths.
+* **Weaknesses:** Write a single paragraph (2-3 sentences) summarizing their key weaknesses.
 
-Candidate Data:
+**Candidate Data:**
 {candidate_data_json}
 
-JD:
+**JD:**
 {jd_text}
 """
 
 # ---------- Helpers ----------
 def safe_file_type(uploaded_file):
+    """Return a safe mime type; fall back to extension when needed."""
     try:
         t = getattr(uploaded_file, "type", None)
         if t:
             return t
+        # fallback: look at extension
         name = getattr(uploaded_file, "name", "")
         ext = os.path.splitext(name)[1].lower()
         if ext == ".txt":
@@ -124,6 +127,7 @@ def read_uploaded_file(uploaded_file):
                 text += pt + "\n"
             return text.strip()
         else:
+            # try to read as text safely
             raw = uploaded_file.read()
             if isinstance(raw, bytes):
                 return raw.decode("utf-8", errors="ignore")
@@ -135,38 +139,40 @@ def read_uploaded_file(uploaded_file):
         st.error(f"Error reading file '{getattr(uploaded_file,'name', '')}': {e}")
         return None
 
-def strip_code_fences(text):
-    if not isinstance(text, str):
-        return text
-    m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, flags=re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
-    return text.strip().strip("` \n\r\t")
+def call_gemini_api(prompt, response_mime_type=None, response_schema=None):
+    """Call LLM with retries. Returns parsed JSON (if requested) or text; returns string starting with 'API/Network Error:' on persistent failure."""
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    if response_mime_type and response_schema:
+        payload["generationConfig"] = {
+            "responseMimeType": response_mime_type,
+            "responseSchema": response_schema
+        }
+    MAX_RETRIES = 4
+    for i in range(MAX_RETRIES):
+        try:
+            resp = requests.post(API_URL, headers={"Content-Type": "application/json"}, data=json.dumps(payload), timeout=30)
+            resp.raise_for_status()
+            result = resp.json()
+            # attempt to pull text
+            content_part = (result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text"))
+            if not content_part:
+                raise ValueError("API response missing content")
+            if response_mime_type == "application/json":
+                # content_part should be a JSON string
+                try:
+                    return json.loads(content_part)
+                except Exception:
+                    return content_part  # fallback - let caller handle
+            return content_part
+        except Exception as e:
+            if i < MAX_RETRIES - 1:
+                time.sleep(2 ** i)
+                continue
+            return f"API/Network Error: {e}"
+    return "API call failed after max retries."
 
-def extract_json_from_text(text):
-    text = strip_code_fences(text)
-    first_brace = text.find("{")
-    snippet = text[first_brace:] if first_brace >= 0 else text
-    try:
-        return json.loads(snippet)
-    except Exception:
-        # attempt to find balanced JSON substring
-        depth = 0
-        start = None
-        for i, ch in enumerate(snippet):
-            if ch == "{":
-                if start is None:
-                    start = i
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0 and start is not None:
-                    candidate = snippet[start:i+1]
-                    try:
-                        return json.loads(candidate)
-                    except Exception:
-                        pass
-        return None
+def strip_code_fences(text):
+    return re.sub(r"```(?:[\s\S]*?)```", lambda m: m.group(0).strip("`"), text, flags=re.MULTILINE)
 
 def find_first_markdown_table_block(lines):
     for i in range(len(lines) - 2):
@@ -236,141 +242,76 @@ def to_csv_string(results):
     writer.writerows(results)
     return output.getvalue()
 
-# ---------- OpenAI wrapper ----------
-def call_openai_api(prompt, as_json=False, max_retries=3, model=MODEL_NAME, temperature=0.0):
-    if not OPENAI_API_KEY or OPENAI_API_KEY == "YOUR_OPENAI_KEY_HERE":
-        return "API/Network Error: OPENAI_KEY_INVALID"
-
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-    }
-
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": temperature,
-        "max_tokens": 2000
-    }
-
-    for attempt in range(max_retries):
-        try:
-            resp = requests.post(OPENAI_API_URL, headers=headers, data=json.dumps(payload), timeout=60)
-            if resp.status_code != 200:
-                try:
-                    body = resp.json()
-                except Exception:
-                    body = resp.text
-                raise RuntimeError(f"OpenAI API error {resp.status_code}: {body}")
-            data = resp.json()
-            choices = data.get("choices") or []
-            if not choices:
-                raise ValueError(f"No choices returned: {data}")
-            content = choices[0].get("message", {}).get("content", "")
-            if as_json:
-                parsed = extract_json_from_text(content)
-                if parsed is None:
-                    return f"API/Network Error: OPENAI_INVALID_JSON_RESPONSE: {content[:500]}"
-                return parsed
-            return content
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-                continue
-            return f"API/Network Error: {e}"
-    return "API/Network Error: retries exhausted"
-
-# ---------- Deterministic fallback scoring (balanced) ----------
+# Deterministic fallback scoring
 def compute_fallback_score(foundational_data, cv_text, weights, critical_skills_list):
     matched = foundational_data.get("matched_skills_full", []) or []
     missing = foundational_data.get("missing_skills_full", []) or []
     top_quals = foundational_data.get("top_qualifications_full", []) or []
     quant_ach = foundational_data.get("quantifiable_achievements_full", []) or []
     exp_summary = (foundational_data.get("relevant_experience_summary") or "").lower()
-
     matched_count = len(matched)
     missing_count = len(missing)
     total_skill_candidates = matched_count + missing_count
     matched_ratio = (matched_count / total_skill_candidates) if total_skill_candidates > 0 else 0.0
-
     qual_score = min(1.0, len(top_quals) / 2.0)
     ach_score = min(1.0, len(quant_ach) / 2.0)
     exp_presence = 1.0 if exp_summary.strip() else 0.0
-
     seniority_keywords = ["senior", "lead", "manager", "principal", "head", "director"]
     seniority_score = 1.0 if any(k in exp_summary for k in seniority_keywords) else 0.0
-
     cv_len = len(cv_text or "")
     if cv_len > 2000:
         cv_clarity_score = 1.0
     elif cv_len > 800:
-        cv_clarity_score = 0.8
+        cv_clarity_score = 0.7
     elif cv_len > 300:
-        cv_clarity_score = 0.6
+        cv_clarity_score = 0.4
     else:
-        cv_clarity_score = 0.3
-
+        cv_clarity_score = 0.15
     mw = weights.get("matched_skills_w", 50) / 100.0
     ew = weights.get("experience_relevance_w", 20) / 100.0
     qw = weights.get("qualifications_w", 15) / 100.0
     sw = weights.get("seniority_w", 10) / 100.0
     cw = weights.get("cv_clarity_w", 5) / 100.0
-
     comp_matched = matched_ratio
     comp_exp = exp_presence
-    comp_qual = (qual_score + ach_score) / 2.0
+    comp_qual = qual_score
     comp_sen = seniority_score
     comp_clar = cv_clarity_score
-
     weighted_percent = (comp_matched * mw) + (comp_exp * ew) + (comp_qual * qw) + (comp_sen * sw) + (comp_clar * cw)
-
-    score = 3.0 + weighted_percent * 7.0
-
-    penalty_per_missing = 0.2
-    max_penalty = 1.5
+    score = 1.0 + weighted_percent * 9.0
+    penalty_per_missing = 0.5
+    max_penalty = 3.0
     miss_penalty = min(max_penalty, missing_count * penalty_per_missing)
     score -= miss_penalty
-
-    critical_penalty = 0.0
-    missing_criticals = []
     if critical_skills_list:
+        missing_criticals = []
         crit_lower = [c.strip().lower() for c in critical_skills_list if c.strip()]
         for crit in crit_lower:
-            if not any(crit in (s or "").lower() for s in matched):
+            if not any(crit in (s.lower()) for s in matched):
                 missing_criticals.append(crit)
         if missing_criticals:
-            critical_penalty = 1.0
-    score -= critical_penalty
-
-    score = max(1.0, min(10.0, score))
-
-    if score >= 7.5:
+            score = min(score, 4.0)
+    score = max(0.0, min(10.0, score))
+    if score >= 8.0:
         fit = "High"
     elif score >= 5.0:
         fit = "Medium"
     else:
         fit = "Low"
-
     rationale_parts = []
-    if total_skill_candidates > 0:
-        rationale_parts.append(f"Matched {matched_count} / {total_skill_candidates} JD skills ({int(round(matched_ratio*100))}%).")
-    else:
-        rationale_parts.append("No explicit JD skill matches detected.")
+    rationale_parts.append(f"Matched {matched_count} / {total_skill_candidates} JD skills ({int(round(matched_ratio*100))}%).")
     if top_quals:
-        rationale_parts.append(f"{len(top_quals)} qualification(s) detected.")
+        rationale_parts.append(f"{len(top_quals)} qualifications detected.")
     if quant_ach:
         rationale_parts.append(f"{len(quant_ach)} quantifiable achievement(s).")
     if missing_count:
-        rationale_parts.append(f"Soft penalty applied for {missing_count} missing skill(s).")
-    if missing_criticals:
-        rationale_parts.append(f"Additional mild penalty for missing critical skill(s): {', '.join(missing_criticals)}.")
-
+        rationale_parts.append(f"Penalty applied for {missing_count} missing skill(s).")
+    if critical_skills_list and 'missing_criticals' in locals() and missing_criticals:
+        rationale_parts.append(f"Critical skill(s) missing: {', '.join(missing_criticals)} -> score capped/penalized.")
     rationale = " ".join(rationale_parts)
     return score, fit, rationale
 
-# ---------- Main app ----------
+# ---------- Main app wrapped in try/except ----------
 def main():
     st.set_page_config(page_title="IIM Sirmaur HR Tool", layout="wide", page_icon="🏛️")
     st.markdown("<div class='iim-header'><h1>IIM Sirmaur</h1><p>AI-Powered HR Evaluation Tool</p></div>", unsafe_allow_html=True)
@@ -440,45 +381,44 @@ def main():
 
             for i, cv_file in enumerate(cv_files):
                 try:
-                    progress_bar.progress(i / len(cv_files), text=f"Processing {cv_file.name}...")
+                    progress_bar.progress((i) / len(cv_files), text=f"Processing {cv_file.name}...")
                     cv_text = read_uploaded_file(cv_file)
                     if not cv_text:
                         st.warning(f"Skipping {cv_file.name}: could not read content.")
                         continue
 
-                    # Phase 1: foundational extraction (ask OpenAI to return JSON)
-                    foundational_data = {
-                        "matched_skills_full": [],
-                        "missing_skills_full": [],
-                        "top_qualifications_full": [],
-                        "quantifiable_achievements_full": [],
-                        "relevant_experience_summary": ""
+                    # Phase 1: foundational extraction
+                    schema = {
+                        "type": "OBJECT",
+                        "properties": {
+                            "matched_skills_full": {"type": "ARRAY", "items": {"type": "STRING"}},
+                            "missing_skills_full": {"type": "ARRAY", "items": {"type": "STRING"}},
+                            "top_qualifications_full": {"type": "ARRAY", "items": {"type": "STRING"}},
+                            "quantifiable_achievements_full": {"type": "ARRAY", "items": {"type": "STRING"}},
+                            "relevant_experience_summary": {"type": "STRING"}
+                        }
                     }
-
                     full_prompt_p1 = FOUNDATIONAL_ANALYSIS_PROMPT.format(jd_text=jd_text, cv_text=cv_text)
-                    fd = call_openai_api(full_prompt_p1, as_json=True)
-                    if isinstance(fd, str) and fd.startswith("API/Network Error"):
-                        st.info(f"Foundational extraction failed for {cv_file.name}; using deterministic fallback scoring.\n\n{fd}")
-                    else:
-                        if isinstance(fd, dict):
-                            foundational_data = {
-                                "matched_skills_full": fd.get("matched_skills_full", []) or [],
-                                "missing_skills_full": fd.get("missing_skills_full", []) or [],
-                                "top_qualifications_full": fd.get("top_qualifications_full", []) or [],
-                                "quantifiable_achievements_full": fd.get("quantifiable_achievements_full", []) or [],
-                                "relevant_experience_summary": fd.get("relevant_experience_summary", "") or ""
-                            }
-                        else:
-                            st.info(f"Foundational extraction returned non-dict JSON for {cv_file.name}; using fallback.")
+                    foundational_data = call_gemini_api(full_prompt_p1, "application/json", schema)
+                    if isinstance(foundational_data, str):
+                        st.warning(f"Foundational extraction failed for {cv_file.name}, continuing to fallback: {foundational_data}")
+                        # fallback to minimal empty structure
+                        foundational_data = {
+                            "matched_skills_full": [],
+                            "missing_skills_full": [],
+                            "top_qualifications_full": [],
+                            "quantifiable_achievements_full": [],
+                            "relevant_experience_summary": ""
+                        }
 
                     candidate_data_string = json.dumps(foundational_data, indent=2)
 
-                    # Phase 2: final evaluation table
+                    # Phase 2: ask LLM to produce final table (may be malformed)
+                    final_prompt_with_data = final_eval_template.replace("{candidate_data_json}", candidate_data_string)
+                    final_table_output = call_gemini_api(final_prompt_with_data)
+
                     parsed_data = {}
                     parsed_from_llm = False
-                    final_prompt_with_data = final_eval_template.replace("{candidate_data_json}", candidate_data_string)
-                    final_table_output = call_openai_api(final_prompt_with_data, as_json=False)
-
                     if isinstance(final_table_output, str) and final_table_output and not final_table_output.startswith("API/Network Error"):
                         parsed_try = parse_markdown_table(final_table_output, cv_file.name)
                         if parsed_try and 'error' not in parsed_try and (parsed_try.get("Score") or parsed_try.get("Fit")):
@@ -491,7 +431,6 @@ def main():
                             score_str = str(int(fb_score))
                         else:
                             score_str = str(round(fb_score, 1))
-
                         parsed_data = {
                             "filename": cv_file.name,
                             "Score": score_str,
@@ -502,13 +441,11 @@ def main():
                             "Top Qualifications": ", ".join(foundational_data.get("top_qualifications_full", []) or []),
                             "Quantifiable Achievements": "; ".join(foundational_data.get("quantifiable_achievements_full", []) or [])
                         }
-
+                        # ensure a consistent LLM-table-like preview
                         final_table_output = (
                             "| Score | Fit | Rationale | Matched Skills | Missing Skills | Top Qualifications | Quantifiable Achievements |\n"
                             "|---|---|---|---|---|---|---|\n"
-                            f"| {parsed_data['Score']} | {parsed_data['Fit']} | {parsed_data['Rationale'][:80]}... | "
-                            f"{parsed_data['Matched Skills'][:40]} | {parsed_data['Missing Skills'][:40]} | "
-                            f"{parsed_data['Top Qualifications'][:40]} | {parsed_data['Quantifiable Achievements'][:40]} |"
+                            f"| {parsed_data['Score']} | {parsed_data['Fit']} | {parsed_data['Rationale'][:80]}... | {parsed_data['Matched Skills'][:40]} | {parsed_data['Missing Skills'][:40]} | {parsed_data['Top Qualifications'][:40]} | {parsed_data['Quantifiable Achievements'][:40]} |"
                         )
 
                     score_header = parsed_data.get("Score") or "N/A"
@@ -518,7 +455,7 @@ def main():
                         st.markdown(final_table_output, unsafe_allow_html=True)
 
                         analysis_prompt = STRENGTHS_WEAKNESSES_PROMPT.format(candidate_data_json=candidate_data_string, jd_text=jd_text)
-                        analysis_result = call_openai_api(analysis_prompt, as_json=False)
+                        analysis_result = call_gemini_api(analysis_prompt)
                         st.markdown(f"**Parsed summary for:** {parsed_data.get('filename')}")
                         st.write(f"Score: {parsed_data.get('Score')}")
                         st.write(f"Fit: {parsed_data.get('Fit')}")
@@ -548,7 +485,8 @@ def main():
                     })
 
                 except Exception as e:
-                    st.error(f"Error processing {getattr(cv_file,'name','file')}: {e}")
+                    # show per-file exception but continue with remaining files
+                    st.error(f"Error processing {getattr(cv_file,'name', 'file')}: {e}")
                     st.text(traceback.format_exc())
                     continue
 
