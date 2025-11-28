@@ -14,8 +14,12 @@ from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
 # ---------- Config ----------
-API_KEY = "AIzaSyAGkvuq24NwNWGaFCbZswjhXHBcKyXwyGg"
-API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={API_KEY}"
+API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+if not API_KEY:
+    API_KEY = "AIzaSyAGkvuq24NwNWGaFCbZswjhXHBcKyXwyGg"  # temporary during dev
+
+MODEL_NAME = "gemini-1.5-flash"  # or "gemini-1.5-flash-latest"
+API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={API_KEY}"
 CV_EXTENSIONS = ('.txt', '.pdf')
 
 # ---------- Prompts ----------
